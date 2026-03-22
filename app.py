@@ -458,6 +458,65 @@ elif page == "Shot Map":
         plt.close()
 
         st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+        # ── xG Timeline ──────────────────────────────────────────────────────
+        section("xG Timeline")
+        insight("Cumulative expected goals per minute. Steep spikes = high-quality chances. Goals marked with a ★.")
+
+        palette = {teams[0]: GREEN, teams[1]: BLUE} if len(teams) >= 2 else {teams[0]: GREEN}
+        # rgba fill versions (10% opacity)
+        palette_fill = {
+            teams[0]: "rgba(0,245,122,0.10)",
+            teams[1]: "rgba(59,130,246,0.10)",
+        } if len(teams) >= 2 else {teams[0]: "rgba(0,245,122,0.10)"}
+        fig_timeline = go.Figure()
+
+        for team, color in palette.items():
+            t = shot_rows[shot_rows["team"] == team].copy()
+            t["minute"] = pd.to_numeric(t["minute"], errors="coerce").fillna(0).astype(int)
+            t["xg"] = pd.to_numeric(t.get("shot_statsbomb_xg", 0), errors="coerce").fillna(0.05)
+            t = t.sort_values("minute")
+            t["cumxg"] = t["xg"].cumsum()
+
+            # Line: cumulative xG
+            fig_timeline.add_trace(go.Scatter(
+                x=t["minute"], y=t["cumxg"],
+                mode="lines", name=team,
+                line=dict(color=color, width=2.5, shape="hv"),
+                fill="tozeroy",
+                fillcolor=palette_fill[team],
+            ))
+
+            # Stars: goals
+            goals = t[t["is_goal"] == 1]
+            if not goals.empty:
+                fig_timeline.add_trace(go.Scatter(
+                    x=goals["minute"], y=goals["cumxg"],
+                    mode="markers+text",
+                    marker=dict(symbol="star", size=16, color=color,
+                                line=dict(color=SURFACE, width=1)),
+                    text=["⚽"] * len(goals),
+                    textposition="top center",
+                    textfont=dict(size=11),
+                    name=f"{team} goal",
+                    showlegend=False,
+                ))
+
+        # Halftime line
+        fig_timeline.add_vline(x=45, line=dict(color=BORDER, dash="dash", width=1))
+        fig_timeline.add_annotation(x=45, y=0, text="HT", showarrow=False,
+                                     font=dict(color=MUTED, size=10), yshift=-15)
+
+        fig_timeline.update_layout(
+            **PLOTLY_LAYOUT, height=320,
+            xaxis_title="Minute", yaxis_title="Cumulative xG",
+            xaxis_range=[0, 95],
+            legend=dict(bgcolor=CARD, bordercolor=BORDER),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_timeline, use_container_width=True)
+
+        st.markdown('<hr class="divider">', unsafe_allow_html=True)
         section("Shot Details")
         display_cols = [c for c in ["team", "player", "minute", "x", "y",
                                      "shot_statsbomb_xg", "shot_outcome",
