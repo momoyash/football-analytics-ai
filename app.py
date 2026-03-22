@@ -80,6 +80,12 @@ html, body, [class*="css"], .stApp {{
 
 /* Hide default Streamlit chrome */
 #MainMenu, footer, header {{ visibility: hidden; }}
+
+/* Hide the sidebar collapse button — prevents users getting stuck */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"] {{
+    display: none !important;
+}}
 .block-container {{ padding: 2rem 2.5rem 4rem 2.5rem !important; max-width: 1400px; }}
 
 /* Sidebar */
@@ -607,6 +613,82 @@ elif page == "xG Model":
                        xaxis_title="Predicted xG", yaxis_title="Count",
                        legend=dict(bgcolor=CARD, bordercolor=BORDER))
     st.plotly_chart(fig3, use_container_width=True)
+
+    # ── SHAP explainability ───────────────────────────────────────────────────
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+    section("Why did the model predict this xG?  —  SHAP Explainability")
+    insight("SHAP values show how much each feature <strong>pushed the prediction up (green) or down (red)</strong> from the baseline. Select a shot to explain.")
+
+    import shap
+
+    # Build feature names
+    num_feats = [c for c in ["x","y","shot_distance","minute","second"] if c in X_val.columns]
+    ohe       = model.named_steps["preprocess"].named_transformers_["cat"]
+    cat_feats = list(ohe.get_feature_names_out(["shot_body_part","shot_technique","shot_type"]))
+    all_feats = num_feats + cat_feats
+
+    # Transform validation set
+    X_val_t = model.named_steps["preprocess"].transform(X_val)
+
+    @st.cache_data
+    def compute_shap(_model, _X_val_t):
+        explainer   = shap.TreeExplainer(_model.named_steps["clf"])
+        shap_values = explainer.shap_values(_X_val_t)
+        # GBM returns 1D array for binary classification
+        if isinstance(shap_values, list):
+            shap_values = shap_values[1]
+        return explainer.expected_value if not isinstance(explainer.expected_value, list) \
+               else explainer.expected_value[1], shap_values
+
+    base_val, shap_vals = compute_shap(model, X_val_t)
+
+    col_shap_l, col_shap_r = st.columns([1, 2])
+
+    with col_shap_l:
+        # Shot selector
+        shot_idx = st.slider("Shot index (validation set)", 0, len(X_val) - 1, 0)
+        pred_xg  = float(y_proba[shot_idx])
+        actual   = int(y_val.iloc[shot_idx])
+        st.markdown(kpi("Predicted xG", f"{pred_xg:.3f}", "Goal" if actual else "No goal",
+                        accent=actual==1), unsafe_allow_html=True)
+        st.markdown(kpi("Baseline xG", f"{base_val:.3f}", "Average across all shots"), unsafe_allow_html=True)
+
+        # Top contributing features for this shot
+        sv     = shap_vals[shot_idx]
+        top_k  = np.argsort(np.abs(sv))[::-1][:8]
+        top_names_shap = [all_feats[i] if i < len(all_feats) else f"feat_{i}" for i in top_k]
+        top_sv = sv[top_k]
+        colors_shap = [GREEN if v > 0 else RED for v in top_sv]
+
+        fig_w = go.Figure(go.Bar(
+            x=top_sv[::-1], y=top_names_shap[::-1], orientation="h",
+            marker=dict(color=colors_shap[::-1], line=dict(width=0)),
+        ))
+        fig_w.update_layout(**PLOTLY_LAYOUT, height=340,
+                            xaxis_title="SHAP value (impact on xG)",
+                            yaxis_title="",
+                            title=dict(text="Shot explanation", font=dict(color=TEXT, size=13)))
+        st.plotly_chart(fig_w, use_container_width=True)
+
+    with col_shap_r:
+        section("Global Feature Impact — All Shots")
+        insight("Mean absolute SHAP value across the validation set. Shows which features the model relies on most <em>overall</em>.")
+
+        mean_abs_shap = np.abs(shap_vals).mean(axis=0)
+        top_global    = np.argsort(mean_abs_shap)[::-1][:12]
+        g_names = [all_feats[i] if i < len(all_feats) else f"feat_{i}" for i in top_global]
+        g_vals  = mean_abs_shap[top_global]
+
+        fig_g = go.Figure(go.Bar(
+            x=g_vals[::-1], y=g_names[::-1], orientation="h",
+            marker=dict(color=g_vals[::-1],
+                        colorscale=[[0, BORDER],[1, GREEN]], line=dict(width=0)),
+            text=[f"{v:.4f}" for v in g_vals[::-1]],
+            textposition="outside", textfont=dict(color=MUTED, size=9),
+        ))
+        fig_g.update_layout(**PLOTLY_LAYOUT, height=420,
+                            xaxis_title="Mean |SHAP value|", yaxis_title="")
+        st.plotly_chart(fig_g, use_container_width=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
