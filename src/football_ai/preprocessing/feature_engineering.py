@@ -115,7 +115,10 @@ def compute_shot_features(events: pd.DataFrame) -> pd.DataFrame:
     type_col = _get_col(events, "type", "type_name")
     team_col = _get_col(events, "team", "team_name")
 
-    shots = events[events[type_col].astype(str).str.contains("Shot", na=False)].copy()
+    _per  = pd.to_numeric(events.get("period", 1), errors="coerce").fillna(1)
+    shots = events[
+        events[type_col].astype(str).str.contains("Shot", na=False) & (_per <= 4)
+    ].copy()
     if shots.empty:
         return pd.DataFrame(columns=["avg_shot_distance", "total_xg"])
 
@@ -171,7 +174,10 @@ def build_shot_dataset(events: pd.DataFrame) -> pd.DataFrame:
     """
     type_col = _get_col(events, "type", "type_name")
 
-    shots = events[events[type_col].astype(str).str.contains("Shot", na=False)].copy()
+    _per  = pd.to_numeric(events.get("period", 1), errors="coerce").fillna(1)
+    shots = events[
+        events[type_col].astype(str).str.contains("Shot", na=False) & (_per <= 4)
+    ].copy()
     if shots.empty:
         return pd.DataFrame()
 
