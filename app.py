@@ -256,7 +256,8 @@ with st.sidebar:
 
     page = st.radio(
         "Navigation",
-        ["Overview", "Shot Map", "xG Model", "Team Stats", "Match Outcome"],
+        ["Overview", "Shot Map", "xG Model", "Team Stats", "Match Outcome",
+         "Players", "Match Comparison", "Formation"],
         label_visibility="hidden",
     )
 
@@ -310,6 +311,17 @@ def train_xg_model_cached():
     y_proba = model.predict_proba(X_val)[:, 1]
     metrics = evaluate_xg_model(y_val, y_proba)
     return model, X_val, y_val, y_proba, metrics
+
+@st.cache_data
+def load_all_events():
+    """Load all match event CSVs into one dataframe (shots + passes for positions)."""
+    dfs = []
+    for f in get_csv_files():
+        try:
+            dfs.append(pd.read_csv(f))
+        except Exception:
+            pass
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 @st.cache_data
 def train_outcome_model_cached():
@@ -924,3 +936,526 @@ elif page == "Match Outcome":
     diffs = (agg_sim - sim_input.iloc[0]).abs().sum(axis=1)
     closest = diffs.nsmallest(3).index.tolist()
     insight(f"Your slider profile is closest to: <strong>{', '.join(closest)}</strong>")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PAGE: Players
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "Players":
+    st.markdown('<div class="page-title">Player Analysis</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-subtitle">Shot profiles, xG, and goal scoring across the tournament</div>', unsafe_allow_html=True)
+
+    with st.spinner("Loading all match events..."):
+        all_events = load_all_events()
+
+    if all_events.empty:
+        st.warning("No event data found.")
+    else:
+        def _parse_xy(v):
+            if isinstance(v, str) and v.startswith("["):
+                try:
+                    parts = v.strip("[]").split(",")
+                    return float(parts[0]), float(parts[1])
+                except Exception:
+                    pass
+            return np.nan, np.nan
+
+        shots = all_events[all_events["type"].astype(str).str.contains("Shot", na=False)].copy()
+        xy = shots["location"].map(_parse_xy)
+        shots["x"] = [p[0] for p in xy]
+        shots["y"] = [p[1] for p in xy]
+        shots["is_goal"] = shots["shot_outcome"].astype(str).str.contains("Goal").astype(int)
+        shots["xg"] = pd.to_numeric(shots.get("shot_statsbomb_xg", np.nan), errors="coerce").fillna(0.05)
+
+        # ── Tournament top scorers leaderboard ───────────────────────────────
+        section("Tournament Top Scorers")
+        player_stats = shots.groupby("player").agg(
+            shots  =("is_goal", "count"),
+            goals  =("is_goal", "sum"),
+            total_xg =("xg",    "sum"),
+            team   =("team",    "first"),
+        ).reset_index()
+        player_stats["conversion"] = (player_stats["goals"] / player_stats["shots"]).round(3)
+        player_stats["xg_diff"]    = (player_stats["goals"] - player_stats["total_xg"]).round(2)
+        top20 = player_stats.sort_values("goals", ascending=False).head(20)
+
+        fig_top = go.Figure()
+        fig_top.add_trace(go.Bar(
+            name="Goals", x=top20["player"], y=top20["goals"],
+            marker=dict(color=GREEN, line=dict(width=0)),
+        ))
+        fig_top.add_trace(go.Bar(
+            name="Total xG", x=top20["player"], y=top20["total_xg"].round(2),
+            marker=dict(color=BLUE, opacity=0.75, line=dict(width=0)),
+        ))
+        fig_top.update_layout(
+            **PLOTLY_LAYOUT, barmode="overlay", height=360,
+            yaxis_title="Goals / xG", xaxis_title="",
+            xaxis_tickangle=-35,
+            legend=dict(bgcolor=CARD, bordercolor=BORDER),
+        )
+        st.plotly_chart(fig_top, use_container_width=True)
+        insight("Green bars = actual goals. Blue bars = expected goals. Players above the blue bar over-performed their xG.")
+
+        st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+        # ── Per-player shot map ───────────────────────────────────────────────
+        section("Player Shot Map")
+        all_players = sorted(player_stats.sort_values("goals", ascending=False)["player"].tolist())
+        selected_player = st.selectbox("Select player", all_players)
+
+        p_shots = shots[shots["player"] == selected_player].copy()
+        p_team  = p_shots["team"].iloc[0] if len(p_shots) else "—"
+        p_goals = int(p_shots["is_goal"].sum())
+        p_xg    = p_shots["xg"].sum()
+        p_conv  = p_goals / len(p_shots) if len(p_shots) else 0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.markdown(kpi("Team",       p_team,                 ""), unsafe_allow_html=True)
+        c2.markdown(kpi("Shots",      len(p_shots),           "This tournament"), unsafe_allow_html=True)
+        c3.markdown(kpi("Goals",      p_goals,                f"xG: {p_xg:.2f}", accent=True), unsafe_allow_html=True)
+        c4.markdown(kpi("Conversion", f"{p_conv:.1%}",        "Goals / shots"), unsafe_allow_html=True)
+
+        from mplsoccer import Pitch
+        pitch = Pitch(pitch_type="statsbomb", pitch_color="#0f1923", line_color="#3d5a6e",
+                      half=True)
+        fig_p, ax_p = pitch.draw(figsize=(10, 6))
+        fig_p.patch.set_facecolor(SURFACE)
+
+        valid = p_shots.dropna(subset=["x", "y"])
+        goals_mask = valid["is_goal"].astype(bool).values
+        sizes = (valid["xg"].values * 1200).clip(60, 1200)
+
+        pitch.scatter(valid["x"].values[~goals_mask], valid["y"].values[~goals_mask],
+                      s=sizes[~goals_mask], edgecolors=BLUE, facecolors="none",
+                      linewidths=1.8, ax=ax_p, label="No goal", zorder=4)
+        pitch.scatter(valid["x"].values[goals_mask], valid["y"].values[goals_mask],
+                      s=sizes[goals_mask], edgecolors=GREEN, facecolors=GREEN,
+                      linewidths=1.8, ax=ax_p, label="Goal", zorder=5)
+
+        ax_p.legend(loc="upper left", fontsize=10,
+                    facecolor=CARD, edgecolor=BORDER, labelcolor=TEXT)
+        ax_p.set_title(f"{selected_player} — Shot Map", color=TEXT, fontsize=13,
+                       pad=12, fontweight="600")
+        st.pyplot(fig_p)
+        plt.close()
+
+        st.markdown('<hr class="divider">', unsafe_allow_html=True)
+        section("Shot Details")
+        dcols = [c for c in ["minute","x","y","xg","shot_outcome","shot_body_part","shot_technique"] if c in p_shots.columns]
+        st.dataframe(
+            p_shots[dcols].rename(columns={"xg": "xG", "shot_body_part": "body part",
+                                            "shot_technique": "technique",
+                                            "shot_outcome": "outcome"}).reset_index(drop=True),
+            use_container_width=True, height=280,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PAGE: Match Comparison
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "Match Comparison":
+    st.markdown('<div class="page-title">Match Comparison</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-subtitle">Compare any two matches side-by-side</div>', unsafe_allow_html=True)
+
+    matches = load_matches()
+    match_options = {
+        f"{row['home_team']} vs {row['away_team']}  ·  Week {row['match_week']}": int(row["match_id"])
+        for _, row in matches.sort_values("match_week").iterrows()
+    }
+    keys = list(match_options.keys())
+
+    col_sel1, col_sel2 = st.columns(2)
+    with col_sel1:
+        sel1 = st.selectbox("Match A", keys, index=0, key="mc1")
+    with col_sel2:
+        sel2 = st.selectbox("Match B", keys, index=min(1, len(keys)-1), key="mc2")
+
+    def _load_shots(match_id):
+        csv = RAW_DIR / f"events_{match_id}.csv"
+        if not csv.exists():
+            return pd.DataFrame()
+        ev = pd.read_csv(csv)
+        sh = ev[ev["type"].astype(str).str.contains("Shot", na=False)].copy()
+        def _xy(v):
+            if isinstance(v, str) and v.startswith("["):
+                try:
+                    p = v.strip("[]").split(",")
+                    return float(p[0]), float(p[1])
+                except Exception:
+                    pass
+            return np.nan, np.nan
+        xy = sh["location"].map(_xy)
+        sh["x"] = [p[0] for p in xy]
+        sh["y"] = [p[1] for p in xy]
+        sh["is_goal"] = sh["shot_outcome"].astype(str).str.contains("Goal").astype(int)
+        sh["xg"] = pd.to_numeric(sh.get("shot_statsbomb_xg", np.nan), errors="coerce").fillna(0.05)
+        sh["minute"] = pd.to_numeric(sh["minute"], errors="coerce").fillna(0).astype(int)
+        return sh
+
+    mid1, mid2 = match_options[sel1], match_options[sel2]
+    sh1, sh2   = _load_shots(mid1), _load_shots(mid2)
+
+    def _match_summary(sh, label):
+        teams = sh["team"].dropna().unique()
+        rows  = []
+        for team in teams:
+            t = sh[sh["team"] == team]
+            rows.append({
+                "match": label, "team": team,
+                "shots": len(t), "goals": int(t["is_goal"].sum()),
+                "total_xg": round(t["xg"].sum(), 2),
+                "on_target": int(t["shot_outcome"].astype(str).str.contains("Saved|Goal", na=False).sum()),
+            })
+        return pd.DataFrame(rows)
+
+    sum1 = _match_summary(sh1, sel1.split("·")[0].strip())
+    sum2 = _match_summary(sh2, sel2.split("·")[0].strip())
+    combined = pd.concat([sum1, sum2], ignore_index=True)
+
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+    section("Key Stats — Side by Side")
+    st.dataframe(combined.set_index(["match","team"]), use_container_width=True)
+
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+    section("xG Comparison")
+    fig_cmp = go.Figure()
+    for row in combined.itertuples():
+        color = GREEN if row.match == sum1["match"].iloc[0] else BLUE
+        fig_cmp.add_trace(go.Bar(
+            name=f"{row.match} — {row.team}",
+            x=["Shots", "Goals", "Total xG", "On Target"],
+            y=[row.shots, row.goals, row.total_xg, row.on_target],
+            marker=dict(color=color, opacity=0.85, line=dict(width=0)),
+        ))
+    fig_cmp.update_layout(**PLOTLY_LAYOUT, barmode="group", height=360,
+                          yaxis_title="Value", legend=dict(bgcolor=CARD, bordercolor=BORDER))
+    st.plotly_chart(fig_cmp, use_container_width=True)
+
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+    section("xG Timeline — Both Matches")
+    insight("Solid lines = Match A, dashed lines = Match B. Goal stars mark when each goal was scored.")
+
+    fig_tl = go.Figure()
+    for sh, label, dash, pal in [
+        (sh1, sel1.split("·")[0].strip(), "solid",  {0: GREEN, 1: BLUE}),
+        (sh2, sel2.split("·")[0].strip(), "dash",   {0: YELLOW, 1: RED}),
+    ]:
+        teams = sh["team"].dropna().unique()
+        for i, team in enumerate(teams):
+            t = sh[sh["team"] == team].sort_values("minute")
+            t = t.copy(); t["cumxg"] = t["xg"].cumsum()
+            color = pal.get(i, MUTED)
+            fig_tl.add_trace(go.Scatter(
+                x=t["minute"], y=t["cumxg"],
+                mode="lines", name=f"{label} · {team}",
+                line=dict(color=color, width=2, dash=dash, shape="hv"),
+            ))
+            goals = t[t["is_goal"] == 1]
+            if not goals.empty:
+                fig_tl.add_trace(go.Scatter(
+                    x=goals["minute"], y=goals["cumxg"],
+                    mode="markers", showlegend=False,
+                    marker=dict(symbol="star", size=14, color=color,
+                                line=dict(color=SURFACE, width=1)),
+                ))
+
+    fig_tl.add_vline(x=45, line=dict(color=BORDER, dash="dash", width=1))
+    fig_tl.update_layout(**PLOTLY_LAYOUT, height=360,
+                         xaxis_title="Minute", yaxis_title="Cumulative xG",
+                         xaxis_range=[0, 95],
+                         legend=dict(bgcolor=CARD, bordercolor=BORDER),
+                         hovermode="x unified")
+    st.plotly_chart(fig_tl, use_container_width=True)
+
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+    section("Shot Maps")
+    from mplsoccer import Pitch
+    map_col1, map_col2 = st.columns(2)
+
+    for col, sh, label in [(map_col1, sh1, sel1), (map_col2, sh2, sel2)]:
+        with col:
+            st.markdown(f"**{label.split('·')[0].strip()}**")
+            if sh.empty:
+                st.warning("No data.")
+                continue
+            pitch = Pitch(pitch_type="statsbomb", pitch_color="#0f1923", line_color="#3d5a6e")
+            fig_m, ax_m = pitch.draw(figsize=(6, 4))
+            fig_m.patch.set_facecolor(SURFACE)
+            teams_m = sh["team"].dropna().unique()
+            pal_m = {teams_m[0]: GREEN, teams_m[1]: BLUE} if len(teams_m) >= 2 else {teams_m[0]: GREEN}
+            for team, color in pal_m.items():
+                s = sh[sh["team"] == team].dropna(subset=["x","y"])
+                sizes = (s["xg"].values * 1000).clip(40, 1000)
+                gm = s["is_goal"].astype(bool).values
+                pitch.scatter(s["x"].values[~gm], s["y"].values[~gm],
+                              s=sizes[~gm], edgecolors=color, facecolors="none",
+                              linewidths=1.5, ax=ax_m)
+                pitch.scatter(s["x"].values[gm], s["y"].values[gm],
+                              s=sizes[gm], edgecolors=color, facecolors=color,
+                              linewidths=1.5, ax=ax_m, zorder=5)
+            ax_m.set_title(label.split("·")[0].strip(), color=TEXT, fontsize=10,
+                           pad=8, fontweight="600")
+            st.pyplot(fig_m)
+            plt.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PAGE: Formation Viewer
+# ═══════════════════════════════════════════════════════════════════════════════
+elif page == "Formation":
+    st.markdown('<div class="page-title">Formation Viewer</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-subtitle">Starting XI and live formation timeline after each substitution</div>', unsafe_allow_html=True)
+
+    # StatsBomb position ID → (x, y) on 120×80 pitch (attacking left→right)
+    _PXY = {
+        1:  (5,  40),  2:  (23, 68), 3:  (23, 54), 4:  (23, 40), 5:  (23, 26),
+        6:  (23, 12),  7:  (40, 72), 8:  (40,  8),  9:  (38, 58), 10: (38, 40),
+        11: (38, 22),  12: (55, 72), 13: (52, 58), 14: (52, 40), 15: (52, 22),
+        16: (55,  8),  17: (70, 68), 18: (65, 56), 19: (65, 40), 20: (65, 24),
+        21: (70, 12),  22: (85, 54), 23: (85, 40), 24: (85, 26), 25: (78, 40),
+    }
+
+    def _fmt_form(n):
+        try:
+            return "-".join(str(int(n)))
+        except Exception:
+            return "?"
+
+    def _tactics_to_xi(tac):
+        xi = []
+        for e in tac.get("lineup", []):
+            pid = int(e["position"]["id"])
+            xi.append({
+                "name":          e["player"]["name"],
+                "position_id":   pid,
+                "position_name": e["position"]["name"],
+                "x":             _PXY.get(pid, (85, 40))[0],
+                "y":             _PXY.get(pid, (85, 40))[1],
+            })
+        return xi
+
+    matches_df = load_matches()
+    match_options = {
+        f"{row['home_team']} vs {row['away_team']}  ·  Week {row['match_week']}": int(row["match_id"])
+        for _, row in matches_df.sort_values("match_week").iterrows()
+    }
+    sel_match = st.selectbox("Match", list(match_options.keys()), key="form_match")
+    match_id  = match_options[sel_match]
+
+    @st.cache_data
+    def _load_form_data(mid):
+        return sb.lineups(match_id=mid), sb.events(match_id=mid)
+
+    with st.spinner("Loading lineup data..."):
+        lineups_dict, match_evts = _load_form_data(match_id)
+
+    teams = list(lineups_dict.keys())
+    if len(teams) < 2:
+        st.warning("Could not load lineup data.")
+    else:
+        home_team, away_team = teams[0], teams[1]
+
+        # ── Starting XI & formation from Starting XI events ──────────────────
+        xi_evts = match_evts[match_evts["type"] == "Starting XI"]
+        initial_xi, initial_form = {}, {}
+        for _, ev in xi_evts.iterrows():
+            t   = ev["team"]
+            tac = ev.get("tactics", {})
+            if isinstance(tac, dict):
+                initial_form[t] = _fmt_form(tac.get("formation", "?"))
+                initial_xi[t]   = _tactics_to_xi(tac)
+        for t in [home_team, away_team]:
+            initial_xi.setdefault(t, [])
+            initial_form.setdefault(t, "?")
+
+        # ── Position lookup for pure subs (no tactical shift) ────────────────
+        def _sub_pos(team, player_name):
+            for _, row in lineups_dict[team].iterrows():
+                if row["player_name"] == player_name:
+                    for p in (row.get("positions") or []):
+                        if "Starting XI" not in p.get("start_reason", ""):
+                            return int(p.get("position_id", 23)), p.get("position", "")
+            return 23, "Forward"
+
+        # ── Parse substitutions & tactical shifts ────────────────────────────
+        subs_df   = match_evts[match_evts["type"] == "Substitution"].copy()
+        shifts_df = match_evts[match_evts["type"] == "Tactical Shift"].copy()
+        for df in [subs_df, shifts_df]:
+            df["minute"] = pd.to_numeric(df["minute"], errors="coerce").fillna(0).astype(int)
+
+        change_events = []
+        for _, r in subs_df.iterrows():
+            change_events.append({
+                "minute": int(r["minute"]), "team": r["team"], "type": "sub",
+                "off": str(r.get("player", "")),
+                "on":  str(r.get("substitution_replacement", "")),
+            })
+        for _, r in shifts_df.iterrows():
+            tac = r.get("tactics", {})
+            if isinstance(tac, dict):
+                change_events.append({
+                    "minute": int(r["minute"]), "team": r["team"],
+                    "type": "shift", "tactics": tac,
+                })
+        change_events.sort(key=lambda e: e["minute"])
+
+        # ── Build snapshot list ───────────────────────────────────────────────
+        snapshots    = []
+        current_xi   = {t: [p.copy() for p in initial_xi[t]] for t in teams}
+        current_form = dict(initial_form)
+        subs_log     = []   # HTML strings shown under "Substitutions made"
+
+        def _snap(label, minute):
+            snapshots.append({
+                "label":      label,
+                "minute":     minute,
+                "xi":         {t: [p.copy() for p in current_xi[t]] for t in teams},
+                "formations": dict(current_form),
+                "subs_log":   list(subs_log),
+            })
+
+        _snap("Kick-off  (0')", 0)
+
+        for ev in change_events:
+            team, minute = ev["team"], ev["minute"]
+
+            if ev["type"] == "sub":
+                off, on = ev["off"], ev["on"]
+                has_shift = any(
+                    e["type"] == "shift" and e["team"] == team and e["minute"] == minute
+                    for e in change_events
+                )
+                subs_log.append(
+                    f"<strong>{minute}'</strong> &nbsp;"
+                    f"{off} <span style='color:{RED}'>▼ off</span> &nbsp;·&nbsp; "
+                    f"{on} <span style='color:{GREEN}'>▲ on</span> "
+                    f"<span style='color:{MUTED};font-size:0.8rem;'>({team})</span>"
+                )
+                if not has_shift:
+                    pid_on, pname_on = _sub_pos(team, on)
+                    off_p = next((p for p in current_xi[team] if p["name"] == off), None)
+                    if off_p and pid_on == 23:
+                        pid_on, pname_on = off_p["position_id"], off_p["position_name"]
+                    x_on, y_on = _PXY.get(pid_on, (85, 40))
+                    current_xi[team] = [p for p in current_xi[team] if p["name"] != off]
+                    current_xi[team].append({
+                        "name": on, "position_id": pid_on,
+                        "position_name": pname_on, "x": x_on, "y": y_on,
+                    })
+                    _snap(
+                        f"{minute}'  {off.split()[-1]} off / {on.split()[-1]} on  ({team})",
+                        minute,
+                    )
+
+            elif ev["type"] == "shift":
+                tac = ev["tactics"]
+                current_xi[team]   = _tactics_to_xi(tac)
+                current_form[team] = _fmt_form(tac.get("formation", "?"))
+                sub_ev = next(
+                    (e for e in change_events
+                     if e["type"] == "sub" and e["team"] == team and e["minute"] == minute),
+                    None,
+                )
+                if sub_ev:
+                    label = (
+                        f"{minute}'  {sub_ev['off'].split()[-1]} off / "
+                        f"{sub_ev['on'].split()[-1]} on  ({team})  "
+                        f"[{current_form[team]}]"
+                    )
+                else:
+                    label = f"{minute}'  Tactical shift — {team}  [{current_form[team]}]"
+                _snap(label, minute)
+
+        # ── UI ────────────────────────────────────────────────────────────────
+        view_mode   = st.radio("View", ["One Team", "Both Teams"],
+                               horizontal=True, key="form_view")
+        snap_labels = [s["label"] for s in snapshots]
+
+        if len(snap_labels) > 1:
+            snap_idx = st.select_slider(
+                "Formation timeline",
+                options=range(len(snap_labels)),
+                format_func=lambda i: snap_labels[i],
+                key="form_snap",
+            )
+        else:
+            snap_idx = 0
+            st.info("No substitutions found for this match.")
+
+        snap = snapshots[snap_idx]
+
+        kpi_c1, kpi_c2 = st.columns(2)
+        kpi_c1.markdown(kpi(home_team, snap["formations"].get(home_team, "?"), "Formation"), unsafe_allow_html=True)
+        kpi_c2.markdown(kpi(away_team, snap["formations"].get(away_team, "?"), "Formation"), unsafe_allow_html=True)
+
+        if snap["subs_log"]:
+            section("Substitutions made")
+            for s in snap["subs_log"]:
+                st.markdown(f'<div class="insight-box">{s}</div>', unsafe_allow_html=True)
+
+        st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+        DOT_SIZE = 500
+        from mplsoccer import Pitch
+        import matplotlib.patches as mpatches
+
+        def _draw_team(ax, pitch, xi_list, color, flip=False):
+            xs, ys, names = [], [], []
+            for p in xi_list:
+                x, y = p["x"], p["y"]
+                if flip:
+                    x, y = 120 - x, 80 - y
+                xs.append(x)
+                ys.append(y)
+                names.append(p["name"].split()[-1])
+            if xs:
+                pitch.scatter(xs, ys, s=DOT_SIZE, color=color,
+                              edgecolors=SURFACE, linewidths=1.5,
+                              alpha=0.92, ax=ax, zorder=5)
+                for x, y, name in zip(xs, ys, names):
+                    ax.annotate(
+                        name, xy=(x, y), xytext=(0, 13),
+                        textcoords="offset points", ha="center",
+                        fontsize=8.5, color=color,
+                        fontfamily="DejaVu Sans", fontweight="600",
+                    )
+
+        if view_mode == "One Team":
+            sel_team = st.radio("Team", [home_team, away_team],
+                                horizontal=True, key="form_team")
+            pitch = Pitch(pitch_type="statsbomb",
+                          pitch_color="#0f1923", line_color="#3d5a6e")
+            fig_f, ax_f = pitch.draw(figsize=(12, 8))
+            fig_f.patch.set_facecolor(SURFACE)
+            _draw_team(ax_f, pitch, snap["xi"].get(sel_team, []), GREEN)
+            ax_f.set_title(
+                f"{sel_team}  ·  {snap['formations'].get(sel_team, '?')}",
+                color=TEXT, fontsize=13, pad=12, fontweight="600",
+            )
+            st.pyplot(fig_f)
+            plt.close()
+
+        else:  # Both Teams
+            pitch = Pitch(pitch_type="statsbomb",
+                          pitch_color="#0f1923", line_color="#3d5a6e")
+            fig_f, ax_f = pitch.draw(figsize=(12, 8))
+            fig_f.patch.set_facecolor(SURFACE)
+            _draw_team(ax_f, pitch, snap["xi"].get(home_team, []), GREEN, flip=False)
+            _draw_team(ax_f, pitch, snap["xi"].get(away_team, []), BLUE,  flip=True)
+            hform = snap["formations"].get(home_team, "?")
+            aform = snap["formations"].get(away_team, "?")
+            ax_f.legend(
+                handles=[
+                    mpatches.Patch(color=GREEN, label=f"{home_team}  ({hform})"),
+                    mpatches.Patch(color=BLUE,  label=f"{away_team}  ({aform})"),
+                ],
+                loc="upper center", fontsize=10,
+                facecolor=CARD, edgecolor=BORDER, labelcolor=TEXT,
+            )
+            ax_f.set_title(
+                f"{home_team} ({hform})  vs  {away_team} ({aform})",
+                color=TEXT, fontsize=12, pad=12, fontweight="600",
+            )
+            st.pyplot(fig_f)
+            plt.close()
