@@ -1,4 +1,4 @@
-# ⚽ Football Analytics AI
+# ⚽ Football -xG
 
 A machine learning pipeline for football analytics built on **StatsBomb open data**.
 It models the 2018 FIFA World Cup — all 64 matches, 32 teams, ~200,000 events — and answers two core questions:
