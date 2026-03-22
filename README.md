@@ -85,6 +85,20 @@ Predicts the probability that any given shot results in a goal.
 
 **SHAP explainability** — every prediction can be broken down into per-feature contributions, showing exactly *why* the model gave a shot a particular xG value.
 
+#### How this model compares to commercial xG providers
+
+| | **This model** | **StatsBomb** | **Opta / WhoScored** | **DataMB** |
+|---|---|---|---|---|
+| ROC-AUC | ~0.755 | ~0.80–0.82 | ~0.79–0.81 | ~0.78–0.80 |
+| Training data | 1 tournament (~4k shots) | Millions of shots, 10+ seasons | Millions of shots | Millions of shots |
+| Features used | 7 | 20–30+ | 15–20 | 15–20 |
+| Assist type | ✗ | ✓ | ✓ | ✓ |
+| Defensive pressure | ✗ | ✓ | ✓ | partial |
+| Goalkeeper position | ✗ | ✓ | partial | ✗ |
+| Pre-shot movement | ✗ | ✓ | ✗ | ✗ |
+
+This model captures the core signal — shot location, distance, body part, and technique — which accounts for roughly 80% of xG variance. The remaining gap vs commercial models comes from richer contextual features (assist type, pressure, goalkeeper positioning) and orders of magnitude more training data. This model is equivalent in scope to first-generation xG models used by clubs around 2012–2014, before tracking data became widespread.
+
 ### Match Outcome Model — Random Forest
 
 Predicts match result (win/draw/loss) from 5 team-level features: possession %, passes/min, pressures/min, average shot distance, total xG.
