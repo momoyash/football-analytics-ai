@@ -421,7 +421,10 @@ elif page == "Shot Map":
 
     if csv_path.exists():
         events   = pd.read_csv(csv_path)
-        shot_rows = events[events["type"].astype(str).str.contains("Shot", na=False)].copy()
+        _period  = pd.to_numeric(events["period"], errors="coerce").fillna(0)
+        shot_rows = events[
+            events["type"].astype(str).str.contains("Shot", na=False) & (_period <= 4)
+        ].copy()
 
         def _to_xy(v):
             if isinstance(v, (list, tuple)) and len(v) >= 2:
@@ -960,7 +963,10 @@ elif page == "Players":
                     pass
             return np.nan, np.nan
 
-        shots = all_events[all_events["type"].astype(str).str.contains("Shot", na=False)].copy()
+        _period = pd.to_numeric(all_events["period"], errors="coerce").fillna(0)
+        shots = all_events[
+            all_events["type"].astype(str).str.contains("Shot", na=False) & (_period <= 4)
+        ].copy()
         xy = shots["location"].map(_parse_xy)
         shots["x"] = [p[0] for p in xy]
         shots["y"] = [p[1] for p in xy]
@@ -1076,7 +1082,8 @@ elif page == "Match Comparison":
         if not csv.exists():
             return pd.DataFrame()
         ev = pd.read_csv(csv)
-        sh = ev[ev["type"].astype(str).str.contains("Shot", na=False)].copy()
+        _per = pd.to_numeric(ev["period"], errors="coerce").fillna(0)
+        sh = ev[ev["type"].astype(str).str.contains("Shot", na=False) & (_per <= 4)].copy()
         def _xy(v):
             if isinstance(v, str) and v.startswith("["):
                 try:
